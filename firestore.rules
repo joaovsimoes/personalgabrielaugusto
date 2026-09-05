@@ -2,113 +2,237 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
     function signedIn() {
       return request.auth != null;
     }
 
-    function bootstrapAdmin() {
+    function hasEmail() {
+      return signedIn() && request.auth.token.email != null;
+    }
+
+    function isInitialAdmin() {
+      return hasEmail()
+        && request.auth.token.email == "joao.v.simoes@icloud.com";
+    }
+
+    function hasAdminProfile() {
       return signedIn()
-        && request.auth.token.email_verified == true
-        && request.auth.token.email == 'joao.v.simoes@icloud.com';
+        && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+        && get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data.role == "admin";
     }
 
-    function admin() {
-      return bootstrapAdmin()
-        || (signedIn()
-          && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
-          && get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data.role == 'admin');
+    function isAdmin() {
+      return isInitialAdmin() || hasAdminProfile();
     }
 
-    function ownsStudent(studentId) {
+    function ownsAlunoData(data) {
+      return signedIn() && (
+        ("authUid" in data && data.authUid == request.auth.uid) ||
+        (hasEmail() && "loginInterno" in data && data.loginInterno == request.auth.token.email) ||
+        (hasEmail() && "email" in data && data.email == request.auth.token.email)
+      );
+    }
+
+    function ownsAlunoId(alunoId) {
       return signedIn()
-        && exists(/databases/$(database)/documents/alunos/$(studentId))
-        && get(/databases/$(database)/documents/alunos/$(studentId)).data.authUid == request.auth.uid;
+        && exists(/databases/$(database)/documents/alunos/$(alunoId))
+        && ownsAlunoData(
+          get(/databases/$(database)/documents/alunos/$(alunoId)).data
+        );
     }
 
-    match /anamneses/{documentId} {
-      allow create: if request.resource.data.nome is string
-        && request.resource.data.email is string
-        && request.resource.data.contato is string;
-      allow read, update, delete: if admin();
-    }
-
+    /* Perfis de acesso */
     match /usuarios/{userId} {
-      allow read: if admin() || (signedIn() && request.auth.uid == userId);
-      allow create, update: if admin()
-        || (bootstrapAdmin() && request.auth.uid == userId);
-      allow delete: if admin();
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == userId);
+      allow create, update, delete: if isAdmin();
     }
 
-    match /alunos/{studentId} {
-      allow read: if admin() || (signedIn() && resource.data.authUid == request.auth.uid);
-      allow create, update, delete: if admin();
+    /* Avaliações públicas e consulta protegida */
+    match /anamneses/{documentId} {
+      allow create: if
+        request.resource.data.nome is string
+        && request.resource.data.nome.size() >= 3
+        && request.resource.data.email is string
+        && request.resource.data.email.size() >= 5
+        && request.resource.data.contato is string
+        && request.resource.data.contato.size() >= 8
+        && request.resource.data.termos == true;
+
+      allow read: if isAdmin() || ownsAlunoData(resource.data);
+      allow update, delete: if isAdmin();
     }
 
-    match /treinos/{workoutId} {
-      allow read: if admin() || ownsStudent(resource.data.clientId);
-      allow create, update, delete: if admin();
+    /* Coleção atual usada pelo portal */
+    match /alunos/{alunoId} {
+      allow read: if isAdmin() || ownsAlunoData(resource.data);
+      allow create, update, delete: if isAdmin();
     }
 
-    match /progressoTreinos/{progressId} {
-      allow read: if admin() || ownsStudent(resource.data.clientId);
-      allow create: if admin() || ownsStudent(request.resource.data.clientId);
-      allow update: if admin()
-        || (ownsStudent(resource.data.clientId)
-          && request.resource.data.clientId == resource.data.clientId);
-      allow delete: if admin();
+    /* Compatibilidade com versões antigas */
+    match /clientes/{clienteId} {
+      allow read: if isAdmin() || ownsAlunoData(resource.data);
+      allow create, update, delete: if isAdmin();
     }
 
-    match /historicoTreinos/{historyId} {
-      allow read: if admin() || ownsStudent(resource.data.clientId);
-      allow create: if admin() || ownsStudent(request.resource.data.clientId);
-      allow update, delete: if admin();
-    }
-
+    /* Biblioteca do personal */
     match /exercicios/{exerciseId} {
       allow read: if signedIn();
-      allow create, update, delete: if admin();
+      allow create, update, delete: if isAdmin();
     }
 
+    /* Planos de treino */
+    match /treinos/{workoutId} {
+      allow read: if isAdmin() || (
+        signedIn() && (
+          ("clientAuthUid" in resource.data
+            && resource.data.clientAuthUid == request.auth.uid) ||
+          ("clientId" in resource.data
+            && ownsAlunoId(resource.data.clientId))
+        )
+      );
+
+      allow create, update, delete: if isAdmin();
+    }
+
+    /* Cargas, observações e exercícios realizados pelo aluno */
+    match /progressoTreinos/{progressId} {
+      allow read: if isAdmin() || (
+        signedIn()
+        && resource.data.clientId is string
+        && ownsAlunoId(resource.data.clientId)
+      );
+
+      allow create: if isAdmin() || (
+        signedIn()
+        && request.resource.data.clientId is string
+        && ownsAlunoId(request.resource.data.clientId)
+      );
+
+      allow update: if isAdmin() || (
+        signedIn()
+        && resource.data.clientId is string
+        && request.resource.data.clientId == resource.data.clientId
+        && ownsAlunoId(resource.data.clientId)
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    /* Histórico permanente de treinos concluídos */
+    match /historicoTreinos/{sessionId} {
+      allow read: if isAdmin() || (
+        signedIn()
+        && resource.data.clientId is string
+        && (
+          (
+            exists(/databases/$(database)/documents/alunos/$(resource.data.clientId))
+            && ownsAlunoData(
+              get(/databases/$(database)/documents/alunos/$(resource.data.clientId)).data
+            )
+          )
+          ||
+          (
+            exists(/databases/$(database)/documents/clientes/$(resource.data.clientId))
+            && ownsAlunoData(
+              get(/databases/$(database)/documents/clientes/$(resource.data.clientId)).data
+            )
+          )
+        )
+      );
+
+      allow create: if isAdmin() || (
+        signedIn()
+        && request.resource.data.clientId is string
+        && request.resource.data.exercises is list
+        && (
+          (
+            exists(/databases/$(database)/documents/alunos/$(request.resource.data.clientId))
+            && ownsAlunoData(
+              get(/databases/$(database)/documents/alunos/$(request.resource.data.clientId)).data
+            )
+          )
+          ||
+          (
+            exists(/databases/$(database)/documents/clientes/$(request.resource.data.clientId))
+            && ownsAlunoData(
+              get(/databases/$(database)/documents/clientes/$(request.resource.data.clientId)).data
+            )
+          )
+        )
+      );
+
+      allow update, delete: if isAdmin();
+    }
+
+    /* Configuração pública do formulário de anamnese */
+    match /configuracoes/formularioAvaliacao {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    /* Valores e recorrência dos planos */
     match /configuracoes/financeiro {
       allow read: if signedIn();
-      allow write: if admin();
+      allow create, update, delete: if isAdmin();
     }
 
+    /* Outras configurações do portal */
     match /configuracoes/{configId} {
-      allow read, write: if admin();
+      allow read, create, update, delete: if isAdmin();
     }
 
+    /* Rascunhos de relatórios acessíveis somente pelo personal */
     match /relatoriosRascunhos/{studentId} {
-      allow read, write: if admin();
+      allow read, create, update, delete: if isAdmin();
     }
 
+    /* Relatórios enviados ao aluno */
     match /relatorios/{reportId} {
-      allow read: if admin()
-        || (signedIn() && resource.data.studentAuthUid == request.auth.uid);
-      allow create, update, delete: if admin();
+      allow read: if isAdmin() || (
+        signedIn()
+        && "studentAuthUid" in resource.data
+        && resource.data.studentAuthUid == request.auth.uid
+      );
+      allow create, update, delete: if isAdmin();
     }
 
+    /* Avisos de relatórios e vencimentos */
     match /notificacoes/{notificationId} {
-      allow read: if admin()
-        || (signedIn() && resource.data.studentAuthUid == request.auth.uid);
-      allow create, delete: if admin();
-      allow update: if admin()
-        || (signedIn()
-          && resource.data.studentAuthUid == request.auth.uid
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']));
+      allow read: if isAdmin() || (
+        signedIn()
+        && "studentAuthUid" in resource.data
+        && resource.data.studentAuthUid == request.auth.uid
+      );
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        signedIn()
+        && "studentAuthUid" in resource.data
+        && resource.data.studentAuthUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(["isRead", "readAt"])
+      );
     }
 
+    /* Histórico de pagamentos */
     match /pagamentos/{paymentId} {
-      allow read: if admin()
-        || (signedIn() && resource.data.studentAuthUid == request.auth.uid);
-      allow create, update, delete: if admin();
+      allow read: if isAdmin() || (
+        signedIn()
+        && "studentAuthUid" in resource.data
+        && resource.data.studentAuthUid == request.auth.uid
+      );
+      allow create, update, delete: if isAdmin();
     }
 
+    /* Pedidos de avaliação enviados pelo aluno */
     match /solicitacoesAvaliacao/{requestId} {
-      allow read, update, delete: if admin();
-      allow create: if ownsStudent(request.resource.data.clientId);
+      allow read, update, delete: if isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.clientId is string
+        && ownsAlunoId(request.resource.data.clientId);
     }
 
+    /* Tudo que não foi autorizado acima permanece bloqueado */
     match /{document=**} {
       allow read, write: if false;
     }
