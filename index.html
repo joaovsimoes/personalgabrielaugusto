@@ -7497,7 +7497,6 @@ body.theme-light .platform-welcome{color:#fff!important}
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 <script>
 const firebaseConfig={
   apiKey:"AIzaSyDiEz3ZWwcqO09Xi90Al-fqUCPQZXLz_3M",
@@ -7512,7 +7511,6 @@ const firebaseConfig={
 firebase.initializeApp(firebaseConfig);
 const firebaseAuth=firebase.auth();
 const firebaseDb=firebase.firestore();
-const firebaseStorage=firebase.storage();
 const INITIAL_ADMIN_EMAIL="joao.v.simoes@icloud.com";
 
 const homeView=document.getElementById("homeView");
@@ -8708,21 +8706,13 @@ document.getElementById("saveAdminPhotoBtn").onclick=async()=>{
   if(!firebaseAuth.currentUser)return alert("Entre novamente no painel.");
   if(!pendingAdminPhotoData)return alert("Escolha uma foto primeiro.");
   try{
-    const photoPath=`perfis/${firebaseAuth.currentUser.uid}/avatar.jpg`;
-    let photoUrl=pendingAdminPhotoData;
-    if(pendingAdminPhotoData.startsWith("data:image/")){
-      const photoRef=firebaseStorage.ref(photoPath);
-      await photoRef.put(officialDataUrlToBlob(pendingAdminPhotoData),{contentType:"image/jpeg"});
-      photoUrl=await photoRef.getDownloadURL();
-    }
     await firebaseDb.collection("configuracoes").doc("perfilAdministrador").set({
-      photoData:photoUrl,
-      photoStoragePath:photoPath,
+      photoData:pendingAdminPhotoData,
+      photoStoragePath:"",
       email:firebaseAuth.currentUser.email||"",
       updatedAt:firebase.firestore.FieldValue.serverTimestamp()
     },{merge:true});
-    pendingAdminPhotoData=photoUrl;
-    renderAdminPhoto(photoUrl);
+    renderAdminPhoto(pendingAdminPhotoData);
     showToast("Foto do administrador salva");
   }catch(error){
     console.error(error);
@@ -8733,9 +8723,6 @@ document.getElementById("saveAdminPhotoBtn").onclick=async()=>{
 document.getElementById("removeAdminPhotoBtn").onclick=async()=>{
   if(!confirm("Remover a foto do administrador?"))return;
   try{
-    const profileDoc=await firebaseDb.collection("configuracoes").doc("perfilAdministrador").get();
-    const photoStoragePath=profileDoc.exists?profileDoc.data().photoStoragePath:"";
-    if(photoStoragePath)await firebaseStorage.ref(photoStoragePath).delete().catch(()=>{});
     await firebaseDb.collection("configuracoes").doc("perfilAdministrador").set({
       photoData:"",
       photoStoragePath:"",
@@ -9535,19 +9522,13 @@ document.getElementById("exerciseForm")?.addEventListener("submit",async event=>
       const exerciseRef=editingExerciseId
         ?firebaseDb.collection("exercicios").doc(editingExerciseId)
         :firebaseDb.collection("exercicios").doc();
-      const previous=editingExerciseId?exerciseLibrary.find(item=>item.id===editingExerciseId):null;
       if(data.foto?.startsWith("data:image/")){
-        const photoPath=`exercicios/${exerciseRef.id}/execucao.jpg`;
-        const photoRef=firebaseStorage.ref(photoPath);
-        await photoRef.put(officialDataUrlToBlob(data.foto),{contentType:"image/jpeg"});
-        data.foto=await photoRef.getDownloadURL();
-        data.fotoStoragePath=photoPath;
-      }else if(!data.foto){
-        data.fotoStoragePath="";
-        if(previous?.fotoStoragePath)firebaseStorage.ref(previous.fotoStoragePath).delete().catch(()=>{});
-      }else if(previous?.fotoStoragePath){
-        data.fotoStoragePath=previous.fotoStoragePath;
+        const estimatedBytes=Math.ceil(data.foto.length*0.75);
+        if(estimatedBytes>650*1024){
+          throw new Error("A foto ficou grande demais mesmo após a compactação. Escolha outra imagem.");
+        }
       }
+      data.fotoStoragePath="";
       if(editingExerciseId){
         await exerciseRef.update(data);
         await showFeedbackDialog("Exercício atualizado!","As alterações foram salvas com sucesso.");
@@ -12138,8 +12119,30 @@ function updatePreview(){const data=collect();$('reportClassification').value=da
 function populateStudents(){const select=$('reportStudentId');if(!select)return;const current=select.value;const list=Array.isArray(window.registeredClients)?window.registeredClients:registeredClients||[];select.innerHTML='<option value="">Selecione o aluno</option>'+list.map(c=>`<option value="${esc(c.id)}">${esc(c.nome||c.name||'Aluno')}</option>`).join('');select.value=current}
 async function prepareSection(){try{if(typeof loadRegisteredClients==='function')await loadRegisteredClients()}catch(e){console.warn(e)}populateStudents();updatePreview()}
 function validate(){const form=$('evolutionReportForm');if(!form.reportValidity())return false;if(!$('reportStudentId').value){$('reportStudentId').focus();return false}return true}
-async function makePdfBlob(){if(!validate())return null;updatePreview();if(!window.html2canvas||!window.jspdf)throw new Error('Biblioteca de PDF não carregada. Verifique sua conexão com a internet.');const node=$('evolutionReportPage');const canvas=await html2canvas(node,{scale:2,useCORS:true,backgroundColor:'#ffffff',windowWidth:794});const img=canvas.toDataURL('image/jpeg',.96);const {jsPDF}=window.jspdf;const pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});const pw=210,ph=297;const ih=canvas.height*pw/canvas.width;let y=0,remaining=ih;pdf.addImage(img,'JPEG',0,y,pw,ih);while(remaining>ph){remaining-=ph;y-=ph;pdf.addPage();pdf.addImage(img,'JPEG',0,y,pw,ih)}return pdf.output('blob')}
-function filename(){const d=collect();const name=(d.studentName||'Aluno').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9]+/g,'_');return `Relatorio_Evolucao_${name}_${d.date||today()}.pdf`}
+async function pdfFromNode(node){
+ if(!window.html2canvas||!window.jspdf)throw new Error('Biblioteca de PDF não carregada. Verifique sua conexão com a internet.');
+ if(document.fonts?.ready)await document.fonts.ready;
+ const canvas=await html2canvas(node,{scale:2,useCORS:true,backgroundColor:'#ffffff',windowWidth:794});
+ const img=canvas.toDataURL('image/jpeg',.96);const {jsPDF}=window.jspdf;
+ const pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});const pw=210,ph=297;const ih=canvas.height*pw/canvas.width;
+ let y=0,remaining=ih;pdf.addImage(img,'JPEG',0,y,pw,ih);
+ while(remaining>ph){remaining-=ph;y-=ph;pdf.addPage();pdf.addImage(img,'JPEG',0,y,pw,ih)}
+ return pdf.output('blob');
+}
+async function makePdfBlob(){if(!validate())return null;updatePreview();return pdfFromNode($('evolutionReportPage'))}
+function filenameFromData(d){const name=(d.studentName||'Aluno').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9]+/g,'_');return `Relatorio_Evolucao_${name}_${d.date||today()}.pdf`}
+function filename(){return filenameFromData(collect())}
+async function downloadStoredReport(data){
+ const shell=document.createElement('div');
+ shell.style.cssText='position:fixed;left:-10000px;top:0;width:794px;background:#fff;z-index:-1;pointer-events:none';
+ shell.innerHTML=renderReport(data);document.body.appendChild(shell);
+ try{
+  const blob=await pdfFromNode(shell.querySelector('.evolution-a4'));
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=data.fileName||filenameFromData(data);a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+ }finally{shell.remove()}
+}
+window.gaDownloadStoredReport=downloadStoredReport;
 async function saveDraft(){
  if(!validate())return;
  const d=collect();
@@ -12162,7 +12165,7 @@ $('shareEvolutionPdfBtn')?.addEventListener('click',async()=>{try{const blob=awa
 $('sendEvolutionReportBtn')?.addEventListener('click',async()=>{
  const button=$('sendEvolutionReportBtn');
  try{
-  const blob=await makePdfBlob();if(!blob)return;
+  if(!validate())return;updatePreview();
   const data=collect();
   const list=Array.isArray(window.registeredClients)?window.registeredClients:registeredClients||[];
   const client=list.find(item=>item.id===data.studentId);
@@ -12170,16 +12173,13 @@ $('sendEvolutionReportBtn')?.addEventListener('click',async()=>{
   button.disabled=true;button.textContent='Enviando...';
   const reportRef=firebaseDb.collection('relatorios').doc();
   const fileName=filename();
-  const storageRef=firebaseStorage.ref(`relatorios/${client.authUid}/${reportRef.id}/${fileName}`);
-  await storageRef.put(blob,{contentType:'application/pdf',customMetadata:{studentAuthUid:client.authUid,studentId:client.id}});
-  const pdfUrl=await storageRef.getDownloadURL();
   const batch=firebaseDb.batch();
-  batch.set(reportRef,{...data,studentAuthUid:client.authUid,fileName,pdfUrl,status:'enviado',createdAt:firebase.firestore.FieldValue.serverTimestamp(),sentAt:firebase.firestore.FieldValue.serverTimestamp(),readAt:null});
+  batch.set(reportRef,{...data,studentAuthUid:client.authUid,fileName,pdfUrl:'',storageMode:'firestore',status:'enviado',createdAt:firebase.firestore.FieldValue.serverTimestamp(),sentAt:firebase.firestore.FieldValue.serverTimestamp(),readAt:null});
   const notificationRef=firebaseDb.collection('notificacoes').doc();
   batch.set(notificationRef,{studentId:client.id,studentAuthUid:client.authUid,type:'relatorio',title:'Novo relatório disponível',message:`Seu relatório ${data.number||''} já está disponível.`,reportId:reportRef.id,isRead:false,createdAt:firebase.firestore.FieldValue.serverTimestamp()});
   await batch.commit();
   await firebaseDb.collection('relatoriosRascunhos').doc(data.studentId).delete().catch(()=>{});
-  if(typeof showFeedbackDialog==='function')await showFeedbackDialog('Relatório enviado','O PDF foi salvo no Firebase e já está disponível no acesso do aluno.');
+  if(typeof showFeedbackDialog==='function')await showFeedbackDialog('Relatório enviado','O relatório foi salvo e o aluno já pode gerar o PDF dentro do próprio acesso.');
  }catch(error){alert('Não foi possível enviar o relatório: '+(error.code||error.message))}
  finally{button.disabled=false;button.textContent='Enviar ao aluno'}
 });
@@ -12404,15 +12404,14 @@ body.theme-light .payment-settings-card,body.theme-light .payment-summary-grid a
 
 /* Notificações, relatórios e cobrança do aluno */
 .student-notification-center{display:grid;gap:8px;margin-bottom:16px}.student-notification{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;border:1px solid rgba(237,22,56,.28);border-radius:16px;background:rgba(237,22,56,.08)}.student-notification div{display:grid;gap:3px}.student-notification b{font-size:14px}.student-notification span{font-size:12px;color:var(--student-muted,#747a86)}.student-notification button{border:0;border-radius:10px;padding:9px 12px;background:#ed1638;color:#fff;font-weight:850;white-space:nowrap}
-.student-official-list{display:grid;gap:12px}.student-report-card{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:18px;border:1px solid var(--student-border,#e4e6eb);border-radius:18px;background:var(--student-card,#fff)}.student-report-card div{display:grid;gap:5px}.student-report-card b{font-size:16px}.student-report-card span{font-size:12px;color:var(--student-muted,#747a86)}.student-report-card a{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:10px 15px;border-radius:12px;background:#ed1638;color:#fff;text-decoration:none;font-weight:850;white-space:nowrap}
+.student-official-list{display:grid;gap:12px}.student-report-card{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:18px;border:1px solid var(--student-border,#e4e6eb);border-radius:18px;background:var(--student-card,#fff)}.student-report-card div{display:grid;gap:5px}.student-report-card b{font-size:16px}.student-report-card span{font-size:12px;color:var(--student-muted,#747a86)}.student-report-card a,.student-report-card button{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:10px 15px;border:0;border-radius:12px;background:#ed1638;color:#fff;text-decoration:none;font:inherit;font-weight:850;white-space:nowrap;cursor:pointer}
 .student-billing-official-card{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.student-billing-official-card article{padding:20px;border:1px solid var(--student-border,#e4e6eb);border-radius:18px;background:var(--student-card,#fff)}.student-billing-official-card span{display:block;color:var(--student-muted,#747a86);font-size:12px;margin-bottom:8px}.student-billing-official-card strong{font-size:18px}.student-billing-help{margin:16px 0;color:var(--student-muted,#747a86);font-size:13px}
 
 @media(max-width:1100px){.payment-settings-card{grid-template-columns:repeat(2,1fr)}.payment-settings-card>div{grid-column:1/-1}.payment-row{grid-template-columns:1fr 1fr}.payment-person,.payment-actions{grid-column:1/-1}.payment-actions{justify-content:flex-start}.student-billing-official-card{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:640px){.payment-settings-card,.payment-summary-grid,.payment-toolbar,.payment-row,.student-billing-official-card{grid-template-columns:1fr}.payment-settings-card{padding:16px}.payment-summary-grid strong{font-size:22px}.payment-person,.payment-actions{grid-column:auto}.payment-actions .btn{flex:1}.student-report-card,.student-notification{align-items:flex-start;flex-direction:column}.student-report-card a,.student-notification button{width:100%}}
+@media(max-width:640px){.payment-settings-card,.payment-summary-grid,.payment-toolbar,.payment-row,.student-billing-official-card{grid-template-columns:1fr}.payment-settings-card{padding:16px}.payment-summary-grid strong{font-size:22px}.payment-person,.payment-actions{grid-column:auto}.payment-actions .btn{flex:1}.student-report-card,.student-notification{align-items:flex-start;flex-direction:column}.student-report-card a,.student-report-card button,.student-notification button{width:100%}}
 </style>
 
 <script id="official-production-script">
-function officialDataUrlToBlob(dataUrl){const [header,payload]=String(dataUrl||'').split(',');const mime=(header.match(/data:([^;]+)/)||[])[1]||'application/octet-stream';const binary=atob(payload||'');const bytes=new Uint8Array(binary.length);for(let index=0;index<binary.length;index++)bytes[index]=binary.charCodeAt(index);return new Blob([bytes],{type:mime})}
 const PAYMENT_SETTINGS_REF=()=>firebaseDb.collection('configuracoes').doc('financeiro');
 let officialPaymentSettings={mensal:0,trimestral:0,lembreteDias:5};
 
@@ -12470,7 +12469,22 @@ async function loadStudentOfficialExtras(client){
  if(center){center.hidden=!notifications.length;center.innerHTML=notifications.map(item=>`<article class="student-notification"><div><b>${escapeHtml(item.title||'Notificação')}</b><span>${escapeHtml(item.message||'')}</span></div><button type="button" data-student-notification="${escapeHtml(item.id)}" data-notification-type="${escapeHtml(item.type||'')}">${item.type==='relatorio'?'Ver relatório':'Entendi'}</button></article>`).join('');center.querySelectorAll('[data-student-notification]').forEach(button=>button.onclick=async()=>{if(button.dataset.studentNotification!=='payment-derived')await firebaseDb.collection('notificacoes').doc(button.dataset.studentNotification).update({isRead:true,readAt:firebase.firestore.FieldValue.serverTimestamp()}).catch(()=>{});if(button.dataset.notificationType==='relatorio')openStudentModernSection('reports');else button.closest('.student-notification')?.remove();if(!center.children.length)center.hidden=true})}
  await loadStudentReports(uid);
 }
-async function loadStudentReports(uid=firebaseAuth.currentUser?.uid){const list=document.getElementById('studentReportsList');if(!list||!uid)return;try{const snap=await firebaseDb.collection('relatorios').where('studentAuthUid','==',uid).get();const reports=snap.docs.map(doc=>({id:doc.id,...doc.data()})).filter(item=>item.status==='enviado').sort((a,b)=>(b.sentAt?.seconds||0)-(a.sentAt?.seconds||0));list.innerHTML=reports.length?reports.map(item=>`<article class="student-report-card"><div><b>${escapeHtml(item.number?`Relatório ${item.number}`:'Relatório de evolução')}</b><span>${escapeHtml(item.period||studentDate(item.date))} · GA Score ${escapeHtml(item.score||0)} (${escapeHtml(item.classification||'')})</span></div><a href="${escapeHtml(item.pdfUrl||'#')}" target="_blank" rel="noopener">Abrir PDF</a></article>`).join(''):'<div class="student-modern-empty">Nenhum relatório foi enviado ainda.</div>'}catch(error){console.warn(error);list.innerHTML='<div class="student-modern-empty">Não foi possível carregar os relatórios.</div>'}}
+async function loadStudentReports(uid=firebaseAuth.currentUser?.uid){
+ const list=document.getElementById('studentReportsList');if(!list||!uid)return;
+ try{
+  const snap=await firebaseDb.collection('relatorios').where('studentAuthUid','==',uid).get();
+  const reports=snap.docs.map(doc=>({id:doc.id,...doc.data()})).filter(item=>item.status==='enviado').sort((a,b)=>(b.sentAt?.seconds||0)-(a.sentAt?.seconds||0));
+  window.__gaStudentReports=reports;
+  list.innerHTML=reports.length?reports.map(item=>`<article class="student-report-card"><div><b>${escapeHtml(item.number?`Relatório ${item.number}`:'Relatório de evolução')}</b><span>${escapeHtml(item.period||studentDate(item.date))} · GA Score ${escapeHtml(item.score||0)} (${escapeHtml(item.classification||'')})</span></div>${item.pdfUrl?`<a href="${escapeHtml(item.pdfUrl)}" target="_blank" rel="noopener">Abrir PDF</a>`:`<button type="button" data-student-report="${escapeHtml(item.id)}">Gerar PDF</button>`}</article>`).join(''):'<div class="student-modern-empty">Nenhum relatório foi enviado ainda.</div>';
+  list.querySelectorAll('[data-student-report]').forEach(button=>button.onclick=async()=>{
+   const report=(window.__gaStudentReports||[]).find(item=>item.id===button.dataset.studentReport);if(!report)return;
+   const original=button.textContent;button.disabled=true;button.textContent='Gerando...';
+   try{if(typeof window.gaDownloadStoredReport!=='function')throw new Error('Gerador de PDF indisponível.');await window.gaDownloadStoredReport(report)}
+   catch(error){alert('Não foi possível gerar o PDF: '+(error.message||error))}
+   finally{button.disabled=false;button.textContent=original}
+  });
+ }catch(error){console.warn(error);list.innerHTML='<div class="student-modern-empty">Não foi possível carregar os relatórios.</div>'}
+}
 
 const officialOpenStudentSection=openStudentModernSection;openStudentModernSection=function(section){if(section==='reports'||section==='billing'){document.getElementById('studentDashboardView')?.classList.add('hidden');document.getElementById('studentPlanPage')?.classList.remove('active');document.querySelectorAll('.student-modern-page').forEach(el=>el.classList.toggle('active',el.id===(section==='reports'?'studentReportsSection':'studentBillingSection')));if(section==='reports')loadStudentReports();window.scrollTo({top:0,behavior:'smooth'});return}officialOpenStudentSection(section)};
 
