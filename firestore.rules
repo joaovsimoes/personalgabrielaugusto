@@ -1,0 +1,116 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function bootstrapAdmin() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'joao.v.simoes@icloud.com';
+    }
+
+    function admin() {
+      return bootstrapAdmin()
+        || (signedIn()
+          && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+          && get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data.role == 'admin');
+    }
+
+    function ownsStudent(studentId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/alunos/$(studentId))
+        && get(/databases/$(database)/documents/alunos/$(studentId)).data.authUid == request.auth.uid;
+    }
+
+    match /anamneses/{documentId} {
+      allow create: if request.resource.data.nome is string
+        && request.resource.data.email is string
+        && request.resource.data.contato is string;
+      allow read, update, delete: if admin();
+    }
+
+    match /usuarios/{userId} {
+      allow read: if admin() || (signedIn() && request.auth.uid == userId);
+      allow create, update: if admin()
+        || (bootstrapAdmin() && request.auth.uid == userId);
+      allow delete: if admin();
+    }
+
+    match /alunos/{studentId} {
+      allow read: if admin() || (signedIn() && resource.data.authUid == request.auth.uid);
+      allow create, update, delete: if admin();
+    }
+
+    match /treinos/{workoutId} {
+      allow read: if admin() || ownsStudent(resource.data.clientId);
+      allow create, update, delete: if admin();
+    }
+
+    match /progressoTreinos/{progressId} {
+      allow read: if admin() || ownsStudent(resource.data.clientId);
+      allow create: if admin() || ownsStudent(request.resource.data.clientId);
+      allow update: if admin()
+        || (ownsStudent(resource.data.clientId)
+          && request.resource.data.clientId == resource.data.clientId);
+      allow delete: if admin();
+    }
+
+    match /historicoTreinos/{historyId} {
+      allow read: if admin() || ownsStudent(resource.data.clientId);
+      allow create: if admin() || ownsStudent(request.resource.data.clientId);
+      allow update, delete: if admin();
+    }
+
+    match /exercicios/{exerciseId} {
+      allow read: if signedIn();
+      allow create, update, delete: if admin();
+    }
+
+    match /configuracoes/financeiro {
+      allow read: if signedIn();
+      allow write: if admin();
+    }
+
+    match /configuracoes/{configId} {
+      allow read, write: if admin();
+    }
+
+    match /relatoriosRascunhos/{studentId} {
+      allow read, write: if admin();
+    }
+
+    match /relatorios/{reportId} {
+      allow read: if admin()
+        || (signedIn() && resource.data.studentAuthUid == request.auth.uid);
+      allow create, update, delete: if admin();
+    }
+
+    match /notificacoes/{notificationId} {
+      allow read: if admin()
+        || (signedIn() && resource.data.studentAuthUid == request.auth.uid);
+      allow create, delete: if admin();
+      allow update: if admin()
+        || (signedIn()
+          && resource.data.studentAuthUid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']));
+    }
+
+    match /pagamentos/{paymentId} {
+      allow read: if admin()
+        || (signedIn() && resource.data.studentAuthUid == request.auth.uid);
+      allow create, update, delete: if admin();
+    }
+
+    match /solicitacoesAvaliacao/{requestId} {
+      allow read, update, delete: if admin();
+      allow create: if ownsStudent(request.resource.data.clientId);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
