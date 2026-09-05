@@ -1,0 +1,50 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function bootstrapAdmin() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'joao.v.simoes@icloud.com';
+    }
+
+    function admin() {
+      return bootstrapAdmin()
+        || (signedIn()
+          && firestore.exists(/databases/(default)/documents/usuarios/$(request.auth.uid))
+          && firestore.get(/databases/(default)/documents/usuarios/$(request.auth.uid)).data.role == 'admin');
+    }
+
+    match /relatorios/{studentUid}/{allPaths=**} {
+      allow read: if admin() || (signedIn() && request.auth.uid == studentUid);
+      allow create, update: if admin()
+        && request.resource.size < 12 * 1024 * 1024
+        && request.resource.contentType == 'application/pdf';
+      allow delete: if admin();
+    }
+
+    match /exercicios/{allPaths=**} {
+      allow read: if signedIn();
+      allow create, update: if admin()
+        && request.resource.size < 6 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if admin();
+    }
+
+    match /perfis/{allPaths=**} {
+      allow read: if signedIn();
+      allow create, update: if admin()
+        && request.resource.size < 6 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if admin();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
